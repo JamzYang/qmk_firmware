@@ -260,3 +260,144 @@ static void wireless_enter_connected(uint8_t host_idx) {
 1. 删除 `config.h` 中的宏定义
 2. 恢复 `wireless.c` 中的原始代码
 3. 重新编译刷入
+
+---
+
+## 7. 深度休眠问题修复 (Deep Sleep Bug Fix)
+
+### 问题描述
+
+在完成蓝牙响应优化（第 6 节）后，键盘出现了新问题：**无论背光开启还是关闭，都会进入深度休眠**。这比之前的问题更严重。
+
+### 根本原因分析
+
+#### RUN_MODE_PROCESS_TIME (1秒) 的真正作用
+
+这个 1 秒**不是**"深度休眠前的等待时间"，而是一个**最小稳定间隔**：
+
+```c
+void lpm_task(void) {
+    // 1秒后 lpm_time_up 变为 true，表示"系统已稳定，可以考虑进入休眠"
+    if (!lpm_time_up && sync_timer_elapsed32(lpm_timer_buffer) > RUN_MODE_PROCESS_TIME) {
+        lpm_time_up = true;
+    }
+
+    // 但进入深度休眠还需要满足其他条件！
+    if (蓝牙模式 && lpm_time_up && !indicator_is_running() && lpm_is_kb_idle()) {
+        if (背光关闭 || 背光驱动已超时关闭) {  // ← 这才是关键条件
+            // 进入深度休眠
+        }
+    }
+}
+```
+
+**真正控制深度休眠时间的是 `LED_MATRIX_TIMEOUT`**，而不是 `RUN_MODE_PROCESS_TIME`。
+
+#### K3 Max 的配置
+
+```c
+// keyboards/keychron/k3_max/ansi/white/config.h
+#define LED_MATRIX_TIMEOUT LED_MATRIX_TIMEOUT_INFINITE  // = UINT32_MAX
+```
+
+这意味着：**背光永远不会自动超时关闭**。
+
+#### 深度休眠条件
+
+```c
+if (!led_matrix_is_enabled() ||                              // 条件A: 背光被手动关闭
+    (led_matrix_is_enabled() && led_matrix_is_driver_shutdown()))  // 条件B: 背光开启但驱动超时关闭
+```
+
+由于 `LED_MATRIX_TIMEOUT = INFINITE`：
+- **条件B 永远不会满足**（背光驱动永远不会超时关闭）
+- **只有条件A 会触发深度休眠**（用户手动关闭背光时）
+
+#### 原始行为 vs 错误修改后的行为
+
+| 背光状态 | 原始行为 | 错误修改后 |
+|---------|---------|-----------|
+| 开启 | 不会进入深度休眠 | **会进入深度休眠** |
+| 关闭 | 会进入深度休眠 | **会进入深度休眠** |
+
+#### 错误的预处理器逻辑
+
+我们之前的修改：
+```c
+#ifndef LPM_DISABLE_DEEP_SLEEP_ON_BACKLIGHT_OFF
+    if (背光条件...)
+#endif
+    {
+        // 深度休眠代码
+    }
+```
+
+当定义了宏时，`if` 被删除，但 `{ }` 块**无条件执行**！这是 C 预处理器的经典陷阱。
+
+### 修复方案
+
+#### 步骤 1：修复 lpm.c 的预处理器逻辑
+
+**修改前**（错误）：
+```c
+#if defined(LED_MATRIX_ENABLE) || defined(RGB_MATRIX_ENABLE)
+#    ifndef LPM_DISABLE_DEEP_SLEEP_ON_BACKLIGHT_OFF
+        if (
+#        ifdef LED_MATRIX_ENABLE
+            !led_matrix_is_enabled() ||
+            (led_matrix_is_enabled() && led_matrix_is_driver_shutdown())
+#        endif
+#        ifdef RGB_MATRIX_ENABLE
+                !rgb_matrix_is_enabled() ||
+            (rgb_matrix_is_enabled() && rgb_matrix_is_driver_shutdown())
+#        endif
+        )
+#    endif
+#endif
+```
+
+**修改后**（正确）：
+```c
+#if defined(LED_MATRIX_ENABLE) || defined(RGB_MATRIX_ENABLE)
+#    ifdef LPM_DISABLE_DEEP_SLEEP_ON_BACKLIGHT_OFF
+        if (0)  // 禁用深度休眠
+#    else
+        if (
+#        ifdef LED_MATRIX_ENABLE
+            !led_matrix_is_enabled() ||
+            (led_matrix_is_enabled() && led_matrix_is_driver_shutdown())
+#        endif
+#        ifdef RGB_MATRIX_ENABLE
+                !rgb_matrix_is_enabled() ||
+            (rgb_matrix_is_enabled() && rgb_matrix_is_driver_shutdown())
+#        endif
+        )
+#    endif
+#endif
+```
+
+#### 步骤 2：保留 config.h 中的宏定义
+
+```c
+// keyboards/keychron/k3_max/ansi/white/keymaps/yang/config.h
+#pragma once
+
+// 禁用"背光关闭时进入深度休眠"的行为
+#define LPM_DISABLE_DEEP_SLEEP_ON_BACKLIGHT_OFF
+```
+
+### 修改文件清单
+
+| 文件 | 操作 | 说明 |
+|------|------|------|
+| `keyboards/keychron/common/wireless/lpm.c` | 修改 | 修复预处理器逻辑，使用 `#ifdef` + `if(0)` |
+| `keyboards/keychron/k3_max/ansi/white/keymaps/yang/config.h` | 保留 | 保留 `LPM_DISABLE_DEEP_SLEEP_ON_BACKLIGHT_OFF` 宏 |
+
+### 验证方法
+
+1. 编译固件：`qmk compile -kb keychron/k3_max/ansi/white -km yang`
+2. 刷入键盘
+3. 测试：
+   - 背光关闭状态下，按键应该立即响应（不进入深度休眠）
+   - 背光开启状态下，按键应该立即响应（不进入深度休眠）
+   - 键盘会保持在轻度休眠状态，响应时间为毫秒级

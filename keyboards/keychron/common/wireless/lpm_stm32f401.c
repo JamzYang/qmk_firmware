@@ -106,7 +106,10 @@ void enter_power_mode(pm_t mode) {
 
     writePinLow(BLUETOOTH_INT_OUTPUT_PIN);
     stm32_clock_init();
-    wait_ms(10);
+    // [FIX] Busy wait instead of wait_ms to avoid deadlock if SysTick isn't ready
+    for (volatile uint32_t i = 0; i < 200000; i++) {
+        __asm__("nop");
+    }
     writePinHigh(BLUETOOTH_INT_OUTPUT_PIN);
 }
 

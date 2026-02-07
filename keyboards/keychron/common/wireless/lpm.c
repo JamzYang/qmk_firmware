@@ -271,16 +271,18 @@ void lpm_task(void) {
 
     if ((get_transport() == TRANSPORT_BLUETOOTH || get_transport() == TRANSPORT_P2P4) && lpm_time_up && !indicator_is_running() && lpm_is_kb_idle()) {
 #if defined(LED_MATRIX_ENABLE) || defined(RGB_MATRIX_ENABLE)
+#    ifndef LPM_DISABLE_DEEP_SLEEP_ON_BACKLIGHT_OFF
         if (
-#    ifdef LED_MATRIX_ENABLE
+#        ifdef LED_MATRIX_ENABLE
             !led_matrix_is_enabled() ||
             (led_matrix_is_enabled() && led_matrix_is_driver_shutdown())
-#    endif
-#    ifdef RGB_MATRIX_ENABLE
+#        endif
+#        ifdef RGB_MATRIX_ENABLE
                 !rgb_matrix_is_enabled() ||
             (rgb_matrix_is_enabled() && rgb_matrix_is_driver_shutdown())
-#    endif
+#        endif
         )
+#    endif
 #endif
         {
             if (!lpm_any_matrix_action()) {

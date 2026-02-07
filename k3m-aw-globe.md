@@ -97,4 +97,166 @@ qmk flash -kb keychron/k3_max/ansi/white -km yang
     
     writePinHigh(BLUETOOTH_INT_OUTPUT_PIN);
 ```
-该修复已包含在本次编译的固件中。
+
+
+---
+
+## 6. 蓝牙响应优化 (Bluetooth Response Optimization)
+
+本次更新还包含了两个重要的蓝牙响应优化，解决了用户在日常使用中遇到的两个问题。
+
+### 问题概述
+
+| 问题       | 现象                             | 频率                     | 原因                            |
+| ---------- | -------------------------------- | ------------------------ | ------------------------------- |
+| **问题 1** | 按键需要4-5秒才能响应            | 偶尔（蓝牙信号不稳定时） | 蓝牙断连触发深度休眠            |
+| **问题 2** | 第一次按键没反应，第二次才有反应 | 经常                     | `clear_keyboard()` 清除按键状态 |
+
+### 问题 1：深度休眠延迟（4-5秒无响应）
+
+#### 背景
+用户习惯**关闭背光**使用键盘。在这种状态下，键盘容易进入深度休眠（PM_STOP 模式），导致按键需要4-5秒才能响应。如果背光开着，10分钟内不会出现这个问题。
+
+#### 根本原因分析
+
+在 `lpm.c` 的 `lpm_task()` 函数中，深度休眠需要满足多个条件，其中关键的一条是：
+
+```c
+if (!led_matrix_is_enabled() ||                              // 背光已关闭
+    (led_matrix_is_enabled() && led_matrix_is_driver_shutdown()))  // 或背光超时后驱动关闭
+```
+
+这意味着：
+- **背光关闭时**：`!led_matrix_is_enabled()` 返回 `true`，**立即满足**深度休眠条件
+- **背光开启时**：需要等待背光超时（600秒）后驱动关闭，条件才满足
+
+#### 为什么背光关闭后"感觉"信号更不稳定？
+
+**实际上，蓝牙信号的稳定性在两种情况下是一样的**。但用户感觉背光关闭后更容易断连，原因如下：
+
+**背光开启时**：
+- 即使蓝牙信号不稳定，连接短暂断开
+- 背光驱动不会立即关闭（因为背光是开着的）
+- `led_matrix_is_driver_shutdown()` 返回 `false`
+- 所以**不会进入深度休眠**
+- 只会遇到"第一次按键没反应"的问题
+
+**背光关闭时**：
+- 蓝牙信号不稳定，连接短暂断开
+- `!led_matrix_is_enabled()` 返回 `true`（背光已关闭）
+- **立即满足深度休眠条件**
+- 进入深度休眠，导致 4-5 秒无响应
+
+**结论**：背光关闭不会影响蓝牙信号，但会让深度休眠条件更容易满足，从而放大了蓝牙信号不稳定的影响。
+
+#### 解决方案
+
+在用户的 keymap 中添加配置宏 `LPM_DISABLE_DEEP_SLEEP_ON_BACKLIGHT_OFF`，禁用"背光关闭时进入深度休眠"的行为。
+
+**新增文件**：`keyboards/keychron/k3_max/ansi/white/keymaps/yang/config.h`
+```c
+#pragma once
+
+// Disable deep sleep when backlight is off to prevent 4-5 second wake delay
+#define LPM_DISABLE_DEEP_SLEEP_ON_BACKLIGHT_OFF
+```
+
+**修改文件**：`keyboards/keychron/common/wireless/lpm.c`
+
+在 `lpm_task()` 函数中添加条件编译，当定义了该宏时，跳过背光状态检查：
+
+```c
+#if defined(LED_MATRIX_ENABLE) || defined(RGB_MATRIX_ENABLE)
+#    ifndef LPM_DISABLE_DEEP_SLEEP_ON_BACKLIGHT_OFF
+        if (
+#        ifdef LED_MATRIX_ENABLE
+            !led_matrix_is_enabled() ||
+            (led_matrix_is_enabled() && led_matrix_is_driver_shutdown())
+#        endif
+            // ... RGB_MATRIX 部分省略
+        )
+#    endif
+#endif
+```
+
+**效果**：当定义了 `LPM_DISABLE_DEEP_SLEEP_ON_BACKLIGHT_OFF` 时，无论背光是否关闭，都不会进入深度休眠。键盘将保持在轻度休眠状态，响应时间为毫秒级。
+
+---
+
+### 问题 2：第一次按键丢失
+
+#### 背景
+用户在短暂停顿后按键，第一次按键经常没有反应，需要按第二次才能生效。
+
+#### 根本原因分析
+
+在 `wireless.c` 的 `wireless_enter_connected()` 函数中：
+
+```c
+static void wireless_enter_connected(uint8_t host_idx) {
+    wireless_state = WT_CONNECTED;
+    indicator_set(wireless_state, host_idx);
+    host_index = host_idx;
+
+    clear_keyboard();  // <-- 这里清除了第一次按键！
+    // ...
+}
+```
+
+**问题**：蓝牙模块在某些情况下会重复发送 `EVT_CONNECTED` 事件（例如从低功耗状态恢复时），即使键盘已经处于连接状态。每次收到这个事件，`clear_keyboard()` 都会被调用，清除当前按下的所有按键。
+
+**时间线**：
+1. 键盘空闲，蓝牙连接可能进入低功耗状态
+2. 用户按下第一个键
+3. 蓝牙模块被唤醒，发送 `EVT_CONNECTED` 事件
+4. `wireless_enter_connected()` 被调用
+5. `clear_keyboard()` 清除所有按键状态 ← **第一次按键被丢弃**
+6. 用户需要按第二次
+
+#### 解决方案
+
+修改 `wireless_enter_connected()` 函数，仅在状态真正从非连接变为连接时才调用 `clear_keyboard()`。
+
+**修改文件**：`keyboards/keychron/common/wireless/wireless.c`
+
+```c
+static void wireless_enter_connected(uint8_t host_idx) {
+    kc_printf("wireless_connected %d\n\r", host_idx);
+
+    // Only clear keyboard when transitioning from non-connected to connected state
+    bool was_connected = (wireless_state == WT_CONNECTED);
+
+    wireless_state = WT_CONNECTED;
+    indicator_set(wireless_state, host_idx);
+    host_index = host_idx;
+
+    // Only clear keyboard state on actual reconnection to prevent first keypress loss
+    if (!was_connected) {
+        clear_keyboard();
+    }
+
+    // ... 其余代码不变 ...
+}
+```
+
+---
+
+### 修改文件清单
+
+| 文件                                                         | 操作 | 说明                   |
+| ------------------------------------------------------------ | ---- | ---------------------- |
+| `keyboards/keychron/k3_max/ansi/white/keymaps/yang/config.h` | 新增 | 添加配置宏禁用深度休眠 |
+| `keyboards/keychron/common/wireless/lpm.c`                   | 修改 | 添加条件编译支持       |
+| `keyboards/keychron/common/wireless/wireless.c`              | 修改 | 修复第一次按键丢失     |
+
+### 风险评估
+
+- **问题 1 修复**：低风险，仅影响用户自己的 keymap，不影响公共代码的默认行为
+- **问题 2 修复**：中等风险，修改公共代码，但逻辑改动很小且合理
+
+### 回滚方案
+
+如果出现问题，可以：
+1. 删除 `config.h` 中的宏定义
+2. 恢复 `wireless.c` 中的原始代码
+3. 重新编译刷入

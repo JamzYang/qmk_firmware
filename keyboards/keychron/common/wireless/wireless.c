@@ -261,11 +261,17 @@ static void wireless_enter_reconnecting(uint8_t host_idx) {
 static void wireless_enter_connected(uint8_t host_idx) {
     kc_printf("wireless_connected %d\n\r", host_idx);
 
+    // Only clear keyboard when transitioning from non-connected to connected state
+    bool was_connected = (wireless_state == WT_CONNECTED);
+
     wireless_state = WT_CONNECTED;
     indicator_set(wireless_state, host_idx);
     host_index = host_idx;
 
-    clear_keyboard();
+    // Only clear keyboard state on actual reconnection to prevent first keypress loss
+    if (!was_connected) {
+        clear_keyboard();
+    }
 
     /* Enable NKRO since it may be disabled in pin code entry */
 #if defined(NKRO_ENABLE) && !defined(WIRELESS_NKRO_ENABLE)

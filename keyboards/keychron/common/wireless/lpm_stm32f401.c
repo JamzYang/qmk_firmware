@@ -106,6 +106,7 @@ void enter_power_mode(pm_t mode) {
 
     writePinLow(BLUETOOTH_INT_OUTPUT_PIN);
     stm32_clock_init();
+    wait_ms(10);
     writePinHigh(BLUETOOTH_INT_OUTPUT_PIN);
 }
 

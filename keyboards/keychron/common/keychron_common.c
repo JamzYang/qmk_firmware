@@ -150,6 +150,13 @@ bool process_record_keychron_common(uint16_t keycode, keyrecord_t *record) {
             led_matrix_decrease_speed();
             break;
 #endif
+        case KC_APFN:
+            if (record->event.pressed) {
+                register_code(KC_GLOBE);
+            } else {
+                unregister_code(KC_GLOBE);
+            }
+            return false; // Skip all further processing of this key
         default:
             return true; // Process all other keycodes normally
     }

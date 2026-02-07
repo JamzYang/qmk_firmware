@@ -59,6 +59,7 @@ enum {
     BL_SPI,
     BL_SPD,
 #endif
+    KC_APFN,
     NEW_SAFE_RANGE,
 };
 
